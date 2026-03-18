@@ -53,10 +53,11 @@ func ParseGuestSpecs(s string) ([]GuestSpec, error) {
 	return specs, nil
 }
 
-// guestResult is the JSON line emitted by the guest to stdout.
+// guestResult is the JSON emitted by the guest to stdout.
 type guestResult struct {
-	Block uint64 `json:"block"`
-	Valid bool   `json:"valid"`
+	Block                  uint64 `json:"block"`
+	Valid                  bool   `json:"valid"`                   // legacy single-line format
+	SuccessfulValidation   bool   `json:"successful_validation"`   // zevm-stateless format
 }
 
 // Run executes the guest binary at spec.Path, feeding input via stdin, and
@@ -101,11 +102,11 @@ func Run(ctx context.Context, spec GuestSpec, input []byte, forkName string) (st
 	if parseErr != nil {
 		metrics.BlockVerifiedTotal.WithLabelValues(spec.Name, "error").Inc()
 		metrics.VerificationDurationMs.WithLabelValues(spec.Name).Observe(float64(durationMs))
-		return store.Result{Log: logOutput}, fmt.Errorf("runner [%s]: parsing output: %w (stdout=%q)", spec.Name, parseErr, stdout.String())
+		return store.Result{Log: logOutput}, fmt.Errorf("runner [%s]:   parsing output: %w (stdout=%q)", spec.Name, parseErr, stdout.String())
 	}
 
 	result := "ok"
-	if !line.Valid {
+	if !line.Valid && !line.SuccessfulValidation {
 		result = "fail"
 	}
 	metrics.BlockVerifiedTotal.WithLabelValues(spec.Name, result).Inc()
@@ -114,21 +115,33 @@ func Run(ctx context.Context, spec GuestSpec, input []byte, forkName string) (st
 	return store.Result{
 		Block:      line.Block,
 		Guest:      spec.Name,
-		Valid:      line.Valid,
+		Valid:      line.Valid || line.SuccessfulValidation,
 		Log:        logOutput,
 		DurationMs: durationMs,
 	}, nil
 }
 
-// lastJSONLine finds the last non-empty line in buf and parses it as guestResult.
+// lastJSONLine parses a guestResult from stdout.
+// It first tries the full buffer (handles pretty-printed multi-line JSON),
+// then falls back to scanning backwards line-by-line (handles single-line JSON
+// with trailing log output).
 func lastJSONLine(buf []byte) (guestResult, error) {
-	lines := bytes.Split(bytes.TrimRight(buf, "\n"), []byte("\n"))
+	trimmed := bytes.TrimSpace(buf)
+	if len(trimmed) == 0 {
+		return guestResult{}, io.EOF
+	}
+	// Fast path: whole buffer is valid JSON.
+	var r guestResult
+	if err := json.Unmarshal(trimmed, &r); err == nil {
+		return r, nil
+	}
+	// Fallback: scan backwards for the last line that parses as JSON.
+	lines := bytes.Split(trimmed, []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := bytes.TrimSpace(lines[i])
 		if len(line) == 0 {
 			continue
 		}
-		var r guestResult
 		if err := json.Unmarshal(line, &r); err != nil {
 			return guestResult{}, fmt.Errorf("invalid JSON %q: %w", line, err)
 		}

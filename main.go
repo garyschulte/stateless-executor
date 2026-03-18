@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,17 @@ import (
 )
 
 func main() {
+	// ── Flags ──────────────────────────────────────────────────────────────────
+	var formatStr string
+	flag.StringVar(&formatStr, "format", "ssz", "guest input encoding: rlp, ssz, or json")
+	flag.StringVar(&formatStr, "f", "ssz", "guest input encoding (shorthand for --format)")
+	flag.Parse()
+
+	format, err := pipeline.ParseFormat(formatStr)
+	if err != nil {
+		log.Fatalf("--format: %v", err)
+	}
+
 	// ── Config from environment ────────────────────────────────────────────────
 	elURLs := splitEnv("EL_RPC_URLS")
 	forkName := os.Getenv("FORK_NAME")
@@ -81,7 +93,7 @@ func main() {
 			log.Printf("block #%d: fetching", blockNum)
 
 			fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
-			input, elNode, meta, err := pipeline.Fetch(fetchCtx, p, blockNum)
+			input, elNode, meta, err := pipeline.Fetch(fetchCtx, p, blockNum, format)
 			fetchCancel()
 			if err != nil {
 				log.Printf("block #%d: fetch error: %v", blockNum, err)
